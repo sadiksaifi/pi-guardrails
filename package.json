@@ -15,5 +15,8 @@
     "oxfmt": "^0.46.0",
     "oxlint": "^1.61.0",
     "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "^0.68.0"
   }
 }

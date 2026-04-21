@@ -27,6 +27,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .cache
 *.tsbuildinfo
 
+# husky
+.husky/_/
+
 # IntelliJ based IDEs
 .idea
 

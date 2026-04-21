@@ -1,3 +1,16 @@
+import { homedir } from "node:os";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  normalize,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
+import { lstat, realpath } from "node:fs/promises";
+
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "@mariozechner/pi-coding-agent";
 
 export type PermissionMode = "default" | "full-access";
@@ -83,18 +96,33 @@ interface ScopedGrant {
   scope: string;
 }
 
+interface CanonicalTarget {
+  canonicalPath: string;
+  parentDir: string;
+  hadTraversal: boolean;
+  outsideCwd: boolean;
+  candidates: string[];
+}
+
+interface PathRule {
+  include: string[];
+  exclude?: string[];
+}
+
 const NORMAL_PROMPT_TITLE = "Do you want to allow this action?";
 const STRICT_PROMPT_TITLE = "Do you want to allow this sensitive action?";
 const PERMISSIONS_SELECTOR_TITLE = "What permissions do you want for this session?";
 const PERMISSIONS_EVENT_CHANNEL = "pi-guardrails:register-tool-contract";
-const BUILT_IN_TOOLS = new Set(["read", "grep", "find", "ls", "edit", "write", "bash"]);
 
-export function registerGuardrailsToolContract(
-  events: Pick<ExtensionAPI, "events"> | Pick<ExtensionRegistration, "events">,
-  registration: GuardrailsToolRegistration,
-): void {
-  events.events.emit(PERMISSIONS_EVENT_CHANNEL, registration);
-}
+const BUILT_IN_READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const SAFETY_PATH_RULES: PathRule[] = [
+  { include: [".pi/**", ".agents/**", "AGENTS.md", "CLAUDE.md", "SYSTEM.md", "APPEND_SYSTEM.md"] },
+  { include: [".git/**"] },
+  { include: [".env", ".env.*"], exclude: [".env.example"] },
+  { include: [".npmrc", ".netrc", ".pypirc", ".aws/**", ".ssh/**", "*.pem", "*.key", "*.p12", "*.pfx"] },
+  { include: ["node_modules/**"] },
+  { include: ["~/.bashrc", "~/.zshrc", "~/.profile", "~/.config/**"] },
+];
 
 function isPermissionMode(value: string | undefined): value is PermissionMode {
   return value === "default" || value === "full-access";
@@ -102,6 +130,175 @@ function isPermissionMode(value: string | undefined): value is PermissionMode {
 
 function toUserFacingPermissions(value: PermissionMode): "Default" | "Full Access" {
   return value === "default" ? "Default" : "Full Access";
+}
+
+function normalizeForGlob(value: string): string {
+  return value.replaceAll("\\", "/");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+}
+
+function globToRegExp(pattern: string): RegExp {
+  let source = "^";
+
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index]!;
+    const next = pattern[index + 1];
+
+    if (char === "*" && next === "*") {
+      source += ".*";
+      index += 1;
+      continue;
+    }
+
+    if (char === "*") {
+      source += "[^/]*";
+      continue;
+    }
+
+    if (char === "?") {
+      source += "[^/]";
+      continue;
+    }
+
+    source += escapeRegExp(char);
+  }
+
+  source += "$";
+  return new RegExp(source);
+}
+
+function matchesGlob(pattern: string, candidates: readonly string[]): boolean {
+  const matcher = globToRegExp(normalizeForGlob(pattern));
+  return candidates.some((candidate) => matcher.test(normalizeForGlob(candidate)));
+}
+
+function matchesPathRule(rule: PathRule, candidates: readonly string[]): boolean {
+  const included = rule.include.some((pattern) => matchesGlob(pattern, candidates));
+  if (!included) return false;
+
+  return !(rule.exclude ?? []).some((pattern) => matchesGlob(pattern, candidates));
+}
+
+function isSameOrDescendant(path: string, parent: string): boolean {
+  const relativePath = relative(parent, path);
+  return relativePath === "" || (!relativePath.startsWith(`..${sep}`) && relativePath !== "..");
+}
+
+function splitSegments(path: string): string[] {
+  return path.split(/[\\/]+/).filter(Boolean);
+}
+
+function hasTraversalSegments(path: string): boolean {
+  return splitSegments(path).includes("..");
+}
+
+function expandHomePath(path: string): string {
+  if (path === "~") return homedir();
+  if (path.startsWith(`~${sep}`)) return join(homedir(), path.slice(2));
+  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+  return path;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveCanonicalTarget(cwd: string, rawPath: string): Promise<CanonicalTarget> {
+  const expanded = expandHomePath(rawPath);
+  const absoluteInput = isAbsolute(expanded) ? normalize(expanded) : resolve(cwd, expanded);
+
+  let probe = absoluteInput;
+  const missingSegments: string[] = [];
+
+  while (!(await pathExists(probe))) {
+    const parent = dirname(probe);
+    if (parent === probe) break;
+    missingSegments.unshift(basename(probe));
+    probe = parent;
+  }
+
+  const canonicalBase = await realpath(probe);
+  const canonicalPath = normalize(join(canonicalBase, ...missingSegments));
+  const parentDir = missingSegments.length === 0 ? dirname(canonicalPath) : dirname(canonicalPath);
+  const canonicalCwd = await realpath(cwd);
+  const canonicalHome = normalize(await realpath(homedir()));
+  const candidates = buildPathCandidates(canonicalPath, canonicalCwd, canonicalHome);
+
+  return {
+    canonicalPath,
+    parentDir,
+    hadTraversal: hasTraversalSegments(rawPath),
+    outsideCwd: !isSameOrDescendant(canonicalPath, canonicalCwd),
+    candidates,
+  };
+}
+
+function buildPathCandidates(path: string, canonicalCwd: string, canonicalHome: string): string[] {
+  const normalizedPath = normalize(path);
+  const candidates = new Set<string>([normalizedPath, basename(normalizedPath)]);
+
+  if (isSameOrDescendant(normalizedPath, canonicalCwd)) {
+    const relativePath = normalizeForGlob(relative(canonicalCwd, normalizedPath)) || ".";
+    candidates.add(relativePath);
+  }
+
+  if (isSameOrDescendant(normalizedPath, canonicalHome)) {
+    const homeRelative = normalizeForGlob(relative(canonicalHome, normalizedPath));
+    candidates.add(homeRelative === "" ? "~" : `~/${homeRelative}`);
+  }
+
+  return [...candidates];
+}
+
+function isProtectedPath(target: CanonicalTarget): boolean {
+  return SAFETY_PATH_RULES.some((rule) => matchesPathRule(rule, target.candidates));
+}
+
+function getDirectoryScope(toolName: "edit" | "write", target: CanonicalTarget): string {
+  return `${toolName}:dir:${target.parentDir}`;
+}
+
+function buildNormalPrompt(summary: string, scopeCandidate: string | undefined): PermissionDecision {
+  return {
+    outcome: "prompt",
+    classification: "ask",
+    promptKind: "normal",
+    title: NORMAL_PROMPT_TITLE,
+    options: scopeCandidate
+      ? ["Yes", `Yes, ${scopeCandidate} during this session`, "No"]
+      : ["Yes", "No"],
+    summary,
+    scopeCandidate,
+  };
+}
+
+function buildStrictPrompt(
+  summary: string,
+  classification: Extract<GuardrailsClassification, "safety" | "direct-interaction-required" | "explicit-ask">,
+): PermissionDecision {
+  return {
+    outcome: "prompt",
+    classification,
+    promptKind: "strict",
+    title: STRICT_PROMPT_TITLE,
+    options: ["Yes", "No"],
+    summary,
+  };
+}
+
+export function registerGuardrailsToolContract(
+  events: Pick<ExtensionAPI, "events"> | Pick<ExtensionRegistration, "events">,
+  registration: GuardrailsToolRegistration,
+): void {
+  events.events.emit(PERMISSIONS_EVENT_CHANNEL, registration);
 }
 
 export class GuardrailsController {
@@ -141,7 +338,7 @@ export class GuardrailsController {
   }
 
   async decide(input: GuardrailsDecisionInput): Promise<PermissionDecision> {
-    if (BUILT_IN_TOOLS.has(input.toolName)) {
+    if (BUILT_IN_READ_ONLY_TOOLS.has(input.toolName)) {
       return {
         outcome: "allow",
         classification: "allow",
@@ -149,16 +346,21 @@ export class GuardrailsController {
       };
     }
 
+    if (input.toolName === "write") {
+      return this.decideFileMutation("write", input.input);
+    }
+
+    if (input.toolName === "edit") {
+      return this.decideFileMutation("edit", input.input);
+    }
+
+    if (input.toolName === "bash") {
+      return this.decideOrdinaryBuiltInAsk("bash", input.input.command);
+    }
+
     const contract = this.toolContracts.get(input.toolName);
     if (!contract) {
-      return {
-        outcome: "prompt",
-        classification: "explicit-ask",
-        promptKind: "strict",
-        title: STRICT_PROMPT_TITLE,
-        options: ["Yes", "No"],
-        summary: input.toolName,
-      };
+      return buildStrictPrompt(input.toolName, "explicit-ask");
     }
 
     const context: GuardrailsToolContext = {
@@ -188,13 +390,16 @@ export class GuardrailsController {
       classification === "direct-interaction-required" ||
       classification === "explicit-ask"
     ) {
+      return buildStrictPrompt(input.toolName, classification);
+    }
+
+    const scopeCandidate = await contract.getScopeCandidate?.(input.input, context);
+    if (await this.matchesCustomGrant(input.toolName, scopeCandidate, input.input, contract, context)) {
       return {
-        outcome: "prompt",
+        outcome: "allow",
         classification,
-        promptKind: "strict",
-        title: STRICT_PROMPT_TITLE,
-        options: ["Yes", "No"],
-        summary: input.toolName,
+        reason: "scoped-grant",
+        scopeCandidate,
       };
     }
 
@@ -203,17 +408,88 @@ export class GuardrailsController {
         outcome: "allow",
         classification,
         reason: "full-access",
+        scopeCandidate,
       };
     }
 
-    return {
-      outcome: "prompt",
-      classification,
-      promptKind: "normal",
-      title: NORMAL_PROMPT_TITLE,
-      options: ["Yes", "No"],
-      summary: input.toolName,
-    };
+    return buildNormalPrompt(input.toolName, scopeCandidate);
+  }
+
+  private async decideFileMutation(toolName: "edit" | "write", input: Record<string, unknown>): Promise<PermissionDecision> {
+    const rawPath = typeof input.path === "string" ? input.path : ".";
+    const summary = `${toolName} ${rawPath}`;
+    const target = await resolveCanonicalTarget(this.cwd, rawPath);
+
+    if (target.hadTraversal || target.outsideCwd || isProtectedPath(target)) {
+      return buildStrictPrompt(summary, "safety");
+    }
+
+    const scopeCandidate = getDirectoryScope(toolName, target);
+    if (this.permissions === "full-access") {
+      return {
+        outcome: "allow",
+        classification: "ask",
+        reason: "full-access",
+        scopeCandidate,
+      };
+    }
+
+    if (this.hasBuiltInGrant(toolName, target.parentDir)) {
+      return {
+        outcome: "allow",
+        classification: "ask",
+        reason: "scoped-grant",
+        scopeCandidate,
+      };
+    }
+
+    return buildNormalPrompt(summary, scopeCandidate);
+  }
+
+  private decideOrdinaryBuiltInAsk(toolName: string, detail: unknown): PermissionDecision {
+    const summary = typeof detail === "string" ? `${toolName} ${detail}` : toolName;
+
+    if (this.permissions === "full-access") {
+      return {
+        outcome: "allow",
+        classification: "ask",
+        reason: "full-access",
+      };
+    }
+
+    return buildNormalPrompt(summary, undefined);
+  }
+
+  private hasBuiltInGrant(toolName: "edit" | "write", targetDir: string): boolean {
+    const prefix = `${toolName}:dir:`;
+
+    return this.scopedGrants.some((grant) => {
+      if (grant.toolName !== toolName || !grant.scope.startsWith(prefix)) return false;
+      const grantedDir = grant.scope.slice(prefix.length);
+      return isSameOrDescendant(targetDir, grantedDir);
+    });
+  }
+
+  private async matchesCustomGrant(
+    toolName: string,
+    scopeCandidate: string | undefined,
+    input: Record<string, unknown>,
+    contract: GuardrailsToolContract,
+    context: GuardrailsToolContext,
+  ): Promise<boolean> {
+    const toolGrants = this.scopedGrants.filter((grant) => grant.toolName === toolName);
+    if (toolGrants.length === 0) return false;
+
+    for (const grant of toolGrants) {
+      if (contract.matchesScope) {
+        if (await contract.matchesScope(grant.scope, input, context)) return true;
+        continue;
+      }
+
+      if (scopeCandidate && grant.scope === scopeCandidate) return true;
+    }
+
+    return false;
   }
 }
 
@@ -236,7 +512,12 @@ async function showPermissionsSelector(controller: GuardrailsController, ctx: Ex
   updateStatus(controller, ctx);
 }
 
-async function resolveDecision(decision: PermissionDecision, event: ToolCallEvent, ctx: ExtensionContext) {
+async function resolveDecision(
+  controller: GuardrailsController,
+  decision: PermissionDecision,
+  event: ToolCallEvent,
+  ctx: ExtensionContext,
+) {
   if (decision.outcome === "allow") return undefined;
   if (decision.outcome === "block") return { block: true, reason: decision.reason };
 
@@ -252,6 +533,12 @@ async function resolveDecision(decision: PermissionDecision, event: ToolCallEven
 
   const choice = await ctx.ui.select(decision.title, decision.options);
   if (choice === "Yes") return undefined;
+
+  if (decision.scopeCandidate && choice === `Yes, ${decision.scopeCandidate} during this session`) {
+    controller.addScopedGrant(event.toolName, decision.scopeCandidate);
+    return undefined;
+  }
+
   return { block: true, reason: `Blocked by user: ${event.toolName}` };
 }
 
@@ -302,6 +589,6 @@ export default function guardrailsExtension(pi: ExtensionAPI): void {
       toolName: event.toolName,
       input: event.input,
     });
-    return resolveDecision(decision, event, ctx);
+    return resolveDecision(controller, decision, event, ctx);
   });
 }

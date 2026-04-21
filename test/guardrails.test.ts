@@ -32,7 +32,10 @@ function createFakePi() {
     registerCommand(name: string, options: { description?: string }) {
       registrations.commands.push({ name, description: options.description });
     },
-    registerFlag(name: string, options: { description?: string; type: string; default?: boolean | string }) {
+    registerFlag(
+      name: string,
+      options: { description?: string; type: string; default?: boolean | string },
+    ) {
       registrations.flags.push({
         name,
         description: options.description,

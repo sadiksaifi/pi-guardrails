@@ -295,6 +295,36 @@ test("readonly bash sequences allow stdout-only printf", async () => {
   });
 });
 
+test("readonly bash pipelines run without prompts", async () => {
+  const controller = new GuardrailsController({ cwd: await createTempProject() });
+
+  const decision = await controller.decide({
+    toolName: "bash",
+    input: { command: "rg -n foo src | sed -n '1,220p'" },
+  });
+
+  expect(decision).toEqual<PermissionDecision>({
+    outcome: "allow",
+    classification: "allow",
+    reason: "policy",
+  });
+});
+
+test("readonly bash sequences can include readonly pipelines", async () => {
+  const controller = new GuardrailsController({ cwd: await createTempProject() });
+
+  const decision = await controller.decide({
+    toolName: "bash",
+    input: { command: "pwd && rg -n foo src | sed -n '1,220p'" },
+  });
+
+  expect(decision).toEqual<PermissionDecision>({
+    outcome: "allow",
+    classification: "allow",
+    reason: "policy",
+  });
+});
+
 test("printf with redirection cannot use the readonly allowlist", async () => {
   const controller = new GuardrailsController({ cwd: await createTempProject() });
 
@@ -310,6 +340,96 @@ test("printf with redirection cannot use the readonly allowlist", async () => {
     title: "Do you want to allow this action?",
     options: ["Yes", "No"],
     summary: "bash printf 'hello' > out.txt",
+  });
+});
+
+test("sed in-place edits cannot use the readonly allowlist", async () => {
+  const controller = new GuardrailsController({ cwd: await createTempProject() });
+
+  const decision = await controller.decide({
+    toolName: "bash",
+    input: { command: "sed -i 's/a/b/' file.txt" },
+  });
+
+  expect(decision).toEqual<PermissionDecision>({
+    outcome: "prompt",
+    classification: "ask",
+    promptKind: "normal",
+    title: "Do you want to allow this action?",
+    options: ["Yes", "No"],
+    summary: "bash sed -i 's/a/b/' file.txt",
+  });
+});
+
+test("tee writes inside project require ordinary approval", async () => {
+  const controller = new GuardrailsController({ cwd: await createTempProject() });
+
+  const decision = await controller.decide({
+    toolName: "bash",
+    input: { command: "printf 'hello' | tee out.txt" },
+  });
+
+  expect(decision).toEqual<PermissionDecision>({
+    outcome: "prompt",
+    classification: "ask",
+    promptKind: "normal",
+    title: "Do you want to allow this action?",
+    options: ["Yes", "No"],
+    summary: "bash printf 'hello' | tee out.txt",
+  });
+});
+
+test("tee writes to protected targets use the strict safety prompt", async () => {
+  const controller = new GuardrailsController({ cwd: await createTempProject() });
+
+  const decision = await controller.decide({
+    toolName: "bash",
+    input: { command: "printf 'hello' | tee .env" },
+  });
+
+  expect(decision).toEqual<PermissionDecision>({
+    outcome: "prompt",
+    classification: "safety",
+    promptKind: "strict",
+    title: "Do you want to allow this sensitive action?",
+    options: ["Yes", "No"],
+    summary: "bash printf 'hello' | tee .env",
+  });
+});
+
+test("sed in-place edits to protected targets use the strict safety prompt", async () => {
+  const controller = new GuardrailsController({ cwd: await createTempProject() });
+
+  const decision = await controller.decide({
+    toolName: "bash",
+    input: { command: "sed -i 's/a/b/' .env" },
+  });
+
+  expect(decision).toEqual<PermissionDecision>({
+    outcome: "prompt",
+    classification: "safety",
+    promptKind: "strict",
+    title: "Do you want to allow this sensitive action?",
+    options: ["Yes", "No"],
+    summary: "bash sed -i 's/a/b/' .env",
+  });
+});
+
+test("xargs delegating to rm uses the strict safety prompt", async () => {
+  const controller = new GuardrailsController({ cwd: await createTempProject() });
+
+  const decision = await controller.decide({
+    toolName: "bash",
+    input: { command: "printf 'build\\n' | xargs rm -rf" },
+  });
+
+  expect(decision).toEqual<PermissionDecision>({
+    outcome: "prompt",
+    classification: "safety",
+    promptKind: "strict",
+    title: "Do you want to allow this sensitive action?",
+    options: ["Yes", "No"],
+    summary: "bash printf 'build\\n' | xargs rm -rf",
   });
 });
 

@@ -424,8 +424,94 @@ function splitSequentialShellCommands(command: string): string[] | undefined {
         continue;
       }
 
+      if (char === "|") {
+        if (next === "|") {
+          return undefined;
+        }
+
+        current += char;
+        continue;
+      }
+
+      if (char === ">" || char === "<" || char === "`" || char === "(" || char === ")") {
+        return undefined;
+      }
+
+      current += char;
+      continue;
+    }
+
+    current += char;
+    if (char === quote) {
+      quote = undefined;
+    }
+  }
+
+  if (quote || escaping) {
+    return undefined;
+  }
+
+  const lastSegment = current.trim();
+  if (lastSegment.length === 0) {
+    return segments.length === 0 ? [""] : undefined;
+  }
+
+  segments.push(lastSegment);
+  return segments;
+}
+
+function splitPipedShellCommands(command: string): string[] | undefined {
+  const segments: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | undefined;
+  let escaping = false;
+
+  const pushSegment = () => {
+    const segment = current.trim();
+    if (segment.length === 0) return false;
+    segments.push(segment);
+    current = "";
+    return true;
+  };
+
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    const next = command[index + 1];
+
+    if (escaping) {
+      current += char;
+      escaping = false;
+      continue;
+    }
+
+    if (!quote) {
+      if (char === "\\") {
+        current += char;
+        escaping = true;
+        continue;
+      }
+
+      if (char === '"' || char === "'") {
+        quote = char;
+        current += char;
+        continue;
+      }
+
+      if (char === "$" && next === "(") {
+        return undefined;
+      }
+
+      if (char === "|") {
+        if (next === "|" || !pushSegment()) {
+          return undefined;
+        }
+
+        continue;
+      }
+
       if (
-        char === "|" ||
+        char === "&" ||
+        char === ";" ||
         char === ">" ||
         char === "<" ||
         char === "`" ||
@@ -670,6 +756,15 @@ function getBashScopeCandidate(tokens: readonly string[]): string | undefined {
   return undefined;
 }
 
+function isReadOnlySedCommand(tokens: readonly string[]): boolean {
+  return !tokens
+    .slice(1)
+    .some(
+      (token) =>
+        hasGroupedFlag(["-i"], token) || token === "--in-place" || token.startsWith("--in-place="),
+    );
+}
+
 function isReadOnlyBashCommand(parsed: ParsedShellCommand): boolean {
   if (parsed.complex || parsed.tokens.length === 0) return false;
   const command = parsed.tokens[0]!;
@@ -682,11 +777,83 @@ function isReadOnlyBashCommand(parsed: ParsedShellCommand): boolean {
     return false;
   }
 
-  return SIMPLE_READ_ONLY_BASH_COMMANDS.has(command) || isReadOnlyGitCommand(parsed.tokens);
+  if (SIMPLE_READ_ONLY_BASH_COMMANDS.has(command) || isReadOnlyGitCommand(parsed.tokens)) {
+    return true;
+  }
+
+  return command === "sed" && isReadOnlySedCommand(parsed.tokens);
 }
 
 function getNonOptionArgs(tokens: readonly string[], startIndex: number): string[] {
   return tokens.slice(startIndex).filter((token) => !token.startsWith("-"));
+}
+
+function getTeeTargets(tokens: readonly string[]): string[] {
+  if (tokens[0] !== "tee") return [];
+
+  const targets: string[] = [];
+  let parsingOptions = true;
+
+  for (const token of tokens.slice(1)) {
+    if (parsingOptions && token === "--") {
+      parsingOptions = false;
+      continue;
+    }
+
+    if (parsingOptions && token.startsWith("-") && token !== "-") {
+      continue;
+    }
+
+    parsingOptions = false;
+    targets.push(token);
+  }
+
+  return targets;
+}
+
+function isSedInPlaceFlag(token: string): boolean {
+  return hasGroupedFlag(["-i"], token) || token === "--in-place" || token.startsWith("--in-place=");
+}
+
+function getSedInPlaceTargets(tokens: readonly string[]): string[] {
+  if (tokens[0] !== "sed") return [];
+
+  let inPlace = false;
+  let scriptIndex: number | undefined;
+
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
+
+    if (token === "--") {
+      scriptIndex = index + 1;
+      break;
+    }
+
+    if (token === "-e" || token === "-f" || token === "--expression" || token === "--file") {
+      index += 1;
+      continue;
+    }
+
+    if (token.startsWith("--expression=") || token.startsWith("--file=")) {
+      continue;
+    }
+
+    if (isSedInPlaceFlag(token)) {
+      inPlace = true;
+      continue;
+    }
+
+    if (token.startsWith("-") && token !== "-") {
+      continue;
+    }
+
+    scriptIndex = index;
+    break;
+  }
+
+  if (!inPlace || scriptIndex === undefined) return [];
+
+  return tokens.slice(scriptIndex + 1);
 }
 
 function getMutationTargets(tokens: readonly string[]): string[] {
@@ -711,7 +878,83 @@ function getMutationTargets(tokens: readonly string[]): string[] {
     return operands.slice(1);
   }
 
+  if (command === "tee") {
+    return getTeeTargets(tokens);
+  }
+
+  if (command === "sed") {
+    return getSedInPlaceTargets(tokens);
+  }
+
   return [];
+}
+
+function getXargsDelegatedCommand(tokens: readonly string[]): string | undefined {
+  if (tokens[0] !== "xargs") return undefined;
+
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
+
+    if (token === "--") {
+      return tokens[index + 1];
+    }
+
+    if (
+      token === "-a" ||
+      token === "-d" ||
+      token === "-E" ||
+      token === "-e" ||
+      token === "-I" ||
+      token === "-i" ||
+      token === "-L" ||
+      token === "-l" ||
+      token === "-n" ||
+      token === "-P" ||
+      token === "-s" ||
+      token === "--arg-file" ||
+      token === "--delimiter" ||
+      token === "--eof" ||
+      token === "--replace" ||
+      token === "--max-lines" ||
+      token === "--max-args" ||
+      token === "--max-procs" ||
+      token === "--max-chars"
+    ) {
+      index += 1;
+      continue;
+    }
+
+    if (
+      token.startsWith("-a") ||
+      token.startsWith("-d") ||
+      token.startsWith("-E") ||
+      token.startsWith("-e") ||
+      token.startsWith("-I") ||
+      token.startsWith("-L") ||
+      token.startsWith("-l") ||
+      token.startsWith("-n") ||
+      token.startsWith("-P") ||
+      token.startsWith("-s") ||
+      token.startsWith("--arg-file=") ||
+      token.startsWith("--delimiter=") ||
+      token.startsWith("--eof=") ||
+      token.startsWith("--replace=") ||
+      token.startsWith("--max-lines=") ||
+      token.startsWith("--max-args=") ||
+      token.startsWith("--max-procs=") ||
+      token.startsWith("--max-chars=")
+    ) {
+      continue;
+    }
+
+    if (token.startsWith("-") && token !== "-") {
+      continue;
+    }
+
+    return token;
+  }
+
+  return undefined;
 }
 
 function isRecursiveRm(tokens: readonly string[]): boolean {
@@ -919,6 +1162,22 @@ export class GuardrailsController {
 
   private async decideSingleBashCommand(command: string): Promise<PermissionDecision> {
     const summary = `bash ${command}`.trim();
+    const redirectionTarget = extractRedirectionTarget(command);
+    if (redirectionTarget) {
+      const target = await resolveCanonicalTarget(this.cwd, redirectionTarget);
+      if (target.hadTraversal || target.outsideCwd || isProtectedPath(target)) {
+        return buildStrictPrompt(summary, "safety");
+      }
+    }
+
+    const pipedCommands = splitPipedShellCommands(command);
+    if (pipedCommands && pipedCommands.length > 1) {
+      const decisions = await Promise.all(
+        pipedCommands.map((segment) => this.decideSingleBashCommand(segment)),
+      );
+      return aggregateBashDecisions(summary, decisions);
+    }
+
     const parsed = parseShellCommand(command);
     const firstToken = parsed.tokens[0];
 
@@ -933,6 +1192,14 @@ export class GuardrailsController {
     if (
       (firstToken === "powershell" || firstToken === "pwsh") &&
       DANGEROUS_POWERSHELL_PATTERNS.some((pattern) => pattern.test(command))
+    ) {
+      return buildStrictPrompt(summary, "safety");
+    }
+
+    const xargsDelegatedCommand = getXargsDelegatedCommand(parsed.tokens);
+    if (
+      xargsDelegatedCommand &&
+      (xargsDelegatedCommand === "sudo" || DANGEROUS_BASH_COMMANDS.has(xargsDelegatedCommand))
     ) {
       return buildStrictPrompt(summary, "safety");
     }
@@ -957,14 +1224,6 @@ export class GuardrailsController {
       }
 
       return buildStrictPrompt(summary, "safety");
-    }
-
-    const redirectionTarget = extractRedirectionTarget(command);
-    if (redirectionTarget) {
-      const target = await resolveCanonicalTarget(this.cwd, redirectionTarget);
-      if (target.hadTraversal || target.outsideCwd || isProtectedPath(target)) {
-        return buildStrictPrompt(summary, "safety");
-      }
     }
 
     if (!parsed.complex) {

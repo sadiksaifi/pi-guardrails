@@ -371,7 +371,7 @@ test("extension hides default status and shows full access label in error color"
         },
       ) => void)
     | undefined;
-  const toggleHandler = shortcutHandlers.get("ctrl+shift+p");
+  const toggleHandler = shortcutHandlers.get("alt+p");
 
   sessionStartHandler?.({}, { cwd: process.cwd(), hasUI: true, ui });
   toggleHandler?.({ hasUI: true, ui });
@@ -396,7 +396,7 @@ test("extension registers permissions controls", () => {
     description: "Select permissions for this session",
   });
   expect(registrations.shortcuts).toContainEqual({
-    shortcut: "ctrl+shift+p",
+    shortcut: "alt+p",
     description: "Toggle session permissions",
   });
 });

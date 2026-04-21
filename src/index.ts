@@ -102,7 +102,7 @@ export default function guardrailsExtension(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerShortcut("ctrl+shift+p", {
+  pi.registerShortcut("alt+p", {
     description: "Toggle session permissions",
     handler: (ctx) => {
       controller.togglePermissions();

@@ -142,12 +142,12 @@ This MVP does **not** include:
 
 Users can change global `permissions` in exactly two ways:
 
-1. `Ctrl+Alt+P`
+1. `Alt+P`
 2. `/permissions`
 
-### `Ctrl+Alt+P`
+### `Alt+P`
 
-`Ctrl+Alt+P` toggles only global `permissions`.
+`Alt+P` toggles only global `permissions`.
 
 It is single-purpose.
 
@@ -487,7 +487,7 @@ Current global `permissions`: `Default`
 
 Action A already started.
 
-User presses `Ctrl+Alt+P`.
+User presses `Alt+P`.
 
 Global `permissions` becomes `Full Access`.
 

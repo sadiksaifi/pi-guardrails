@@ -155,6 +155,7 @@ const SIMPLE_READ_ONLY_BASH_COMMANDS = new Set([
   "stat",
   "du",
   "wc",
+  "printf",
 ]);
 const ALWAYS_INTERACTIVE_BASH_COMMANDS = new Set([
   "bash",

@@ -277,6 +277,42 @@ test("readonly bash sequences run without prompts", async () => {
   });
 });
 
+test("readonly bash sequences allow stdout-only printf", async () => {
+  const controller = new GuardrailsController({ cwd: await createTempProject() });
+
+  const decision = await controller.decide({
+    toolName: "bash",
+    input: {
+      command:
+        "pwd && printf '\\n---\\n' && fd -HI -td -d 2 . . && printf '\\n---FILES---\\n' && fd -HI -tf -d 2 . .",
+    },
+  });
+
+  expect(decision).toEqual<PermissionDecision>({
+    outcome: "allow",
+    classification: "allow",
+    reason: "policy",
+  });
+});
+
+test("printf with redirection cannot use the readonly allowlist", async () => {
+  const controller = new GuardrailsController({ cwd: await createTempProject() });
+
+  const decision = await controller.decide({
+    toolName: "bash",
+    input: { command: "printf 'hello' > out.txt" },
+  });
+
+  expect(decision).toEqual<PermissionDecision>({
+    outcome: "prompt",
+    classification: "ask",
+    promptKind: "normal",
+    title: "Do you want to allow this action?",
+    options: ["Yes", "No"],
+    summary: "bash printf 'hello' > out.txt",
+  });
+});
+
 test("compound bash commands keep a single clear scope candidate", async () => {
   const controller = new GuardrailsController({ cwd: await createTempProject() });
 

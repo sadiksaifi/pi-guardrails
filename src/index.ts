@@ -37,7 +37,9 @@ function updateStatus(controller: GuardrailsController, ctx: ExtensionContext): 
   if (!ctx.hasUI) return;
   ctx.ui.setStatus(
     "pi-guardrails",
-    controller.getPermissions() === "full-access" ? "Full Access" : undefined,
+    controller.getPermissions() === "full-access"
+      ? ctx.ui.theme.fg("error", "Full Access")
+      : undefined,
   );
 }
 

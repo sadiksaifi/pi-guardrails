@@ -343,9 +343,19 @@ test("registration helper emits custom tool contracts on the shared event bus", 
   expect(emissions[0]?.channel).toBe("pi-guardrails:register-tool-contract");
 });
 
-test("extension hides default status and shows full access label", () => {
+test("extension hides default status and shows full access label in error color", () => {
   const { pi, registrations, shortcutHandlers } = createFakePi();
   const statuses: Array<string | undefined> = [];
+  const ui = {
+    setStatus(_key: string, value: string | undefined) {
+      statuses.push(value);
+    },
+    theme: {
+      fg(color: string, value: string) {
+        return `${color.toUpperCase()}(${value})`;
+      },
+    },
+  };
 
   guardrailsExtension(pi as never);
 
@@ -357,42 +367,17 @@ test("extension hides default status and shows full access label", () => {
         ctx: {
           cwd: string;
           hasUI: true;
-          ui: { setStatus: (key: string, value: string | undefined) => void };
+          ui: typeof ui;
         },
       ) => void)
     | undefined;
   const toggleHandler = shortcutHandlers.get("ctrl+shift+p");
 
-  sessionStartHandler?.(
-    {},
-    {
-      cwd: process.cwd(),
-      hasUI: true,
-      ui: {
-        setStatus(_key, value) {
-          statuses.push(value);
-        },
-      },
-    },
-  );
-  toggleHandler?.({
-    hasUI: true,
-    ui: {
-      setStatus(_key: string, value: string | undefined) {
-        statuses.push(value);
-      },
-    },
-  });
-  toggleHandler?.({
-    hasUI: true,
-    ui: {
-      setStatus(_key: string, value: string | undefined) {
-        statuses.push(value);
-      },
-    },
-  });
+  sessionStartHandler?.({}, { cwd: process.cwd(), hasUI: true, ui });
+  toggleHandler?.({ hasUI: true, ui });
+  toggleHandler?.({ hasUI: true, ui });
 
-  expect(statuses).toEqual([undefined, "Full Access", undefined]);
+  expect(statuses).toEqual([undefined, "ERROR(Full Access)", undefined]);
 });
 
 test("extension registers permissions controls", () => {

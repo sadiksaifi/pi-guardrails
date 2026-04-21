@@ -10,6 +10,12 @@ import {
   type GuardrailsToolRegistration,
 } from "./guardrails.ts";
 
+const FULL_ACCESS_STATUS_LABEL = "Full Access (unrestricted)";
+const DEFAULT_PERMISSIONS_OPTION =
+  "Default — ask before writes, shell commands, and other risky actions";
+const FULL_ACCESS_PERMISSIONS_OPTION =
+  "Full Access — fewer permission checks for most actions. Recommended only when you trust the agent.";
+
 export {
   GuardrailsController,
   NORMAL_PROMPT_TITLE,
@@ -38,7 +44,7 @@ function updateStatus(controller: GuardrailsController, ctx: ExtensionContext): 
   ctx.ui.setStatus(
     "pi-guardrails",
     controller.getPermissions() === "full-access"
-      ? ctx.ui.theme.fg("error", "Full Access")
+      ? ctx.ui.theme.fg("error", FULL_ACCESS_STATUS_LABEL)
       : undefined,
   );
 }
@@ -49,10 +55,13 @@ async function showPermissionsSelector(
 ): Promise<void> {
   if (!ctx.hasUI) return;
 
-  const choice = await ctx.ui.select(PERMISSIONS_SELECTOR_TITLE, ["Default", "Full Access"]);
+  const choice = await ctx.ui.select(PERMISSIONS_SELECTOR_TITLE, [
+    DEFAULT_PERMISSIONS_OPTION,
+    FULL_ACCESS_PERMISSIONS_OPTION,
+  ]);
   if (!choice) return;
 
-  controller.setPermissions(choice === "Default" ? "default" : "full-access");
+  controller.setPermissions(choice === DEFAULT_PERMISSIONS_OPTION ? "default" : "full-access");
   updateStatus(controller, ctx);
 }
 

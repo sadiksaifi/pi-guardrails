@@ -24,14 +24,19 @@ function createFakePi() {
     },
   };
   const shortcutHandlers = new Map<string, (ctx: unknown) => void>();
+  const commandHandlers = new Map<string, (args: unknown, ctx: unknown) => unknown>();
 
   const pi = {
     events: registrations.events,
     on(event: string, handler: unknown) {
       registrations.handlers.push({ event, handler });
     },
-    registerCommand(name: string, options: { description?: string }) {
+    registerCommand(
+      name: string,
+      options: { description?: string; handler: (args: unknown, ctx: unknown) => unknown },
+    ) {
       registrations.commands.push({ name, description: options.description });
+      commandHandlers.set(name, options.handler);
     },
     registerFlag(
       name: string,
@@ -56,7 +61,7 @@ function createFakePi() {
     },
   };
 
-  return { pi, registrations, shortcutHandlers };
+  return { pi, registrations, shortcutHandlers, commandHandlers };
 }
 
 test("controller starts in default permissions and toggles to full-access", async () => {
@@ -570,7 +575,57 @@ test("extension hides default status and shows full access label in error color"
   toggleHandler?.({ hasUI: true, ui });
   toggleHandler?.({ hasUI: true, ui });
 
-  expect(statuses).toEqual([undefined, "ERROR(Full Access)", undefined]);
+  expect(statuses).toEqual([undefined, "ERROR(Full Access (unrestricted))", undefined]);
+});
+
+test("permissions command shows explanatory options and applies the selected mode", async () => {
+  const { pi, commandHandlers, registrations } = createFakePi();
+  const selections: Array<{ title: string; options: string[] }> = [];
+  const statuses: Array<string | undefined> = [];
+  const ui = {
+    async select(title: string, options: string[]) {
+      selections.push({ title, options });
+      return options[1];
+    },
+    setStatus(_key: string, value: string | undefined) {
+      statuses.push(value);
+    },
+    theme: {
+      fg(color: string, value: string) {
+        return `${color.toUpperCase()}(${value})`;
+      },
+    },
+  };
+
+  guardrailsExtension(pi as never);
+
+  const sessionStartHandler = registrations.handlers.find(
+    (handler) => handler.event === "session_start",
+  )?.handler as
+    | ((
+        event: unknown,
+        ctx: {
+          cwd: string;
+          hasUI: true;
+          ui: typeof ui;
+        },
+      ) => void)
+    | undefined;
+  const permissionsHandler = commandHandlers.get("permissions");
+
+  sessionStartHandler?.({}, { cwd: process.cwd(), hasUI: true, ui });
+  await permissionsHandler?.({}, { hasUI: true, ui });
+
+  expect(selections).toEqual([
+    {
+      title: "What permissions do you want for this session?",
+      options: [
+        "Default — ask before writes, shell commands, and other risky actions",
+        "Full Access — fewer permission checks for most actions. Recommended only when you trust the agent.",
+      ],
+    },
+  ]);
+  expect(statuses).toEqual([undefined, "ERROR(Full Access (unrestricted))"]);
 });
 
 test("extension registers permissions controls", () => {

@@ -354,7 +354,7 @@ test("extension registers permissions controls", () => {
     description: "Select permissions for this session",
   });
   expect(registrations.shortcuts).toContainEqual({
-    shortcut: "ctrl+alt+p",
+    shortcut: "ctrl+shift+p",
     description: "Toggle session permissions",
   });
 });

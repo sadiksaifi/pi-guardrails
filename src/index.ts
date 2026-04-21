@@ -3,10 +3,8 @@ import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "@mariozechne
 import {
   GuardrailsController,
   isPermissionMode,
-  NORMAL_PROMPT_TITLE,
   PERMISSIONS_EVENT_CHANNEL,
   PERMISSIONS_SELECTOR_TITLE,
-  STRICT_PROMPT_TITLE,
   type PermissionDecision,
   type PermissionMode,
   type GuardrailsToolRegistration,
@@ -106,7 +104,7 @@ export default function guardrailsExtension(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerShortcut("ctrl+alt+p", {
+  pi.registerShortcut("ctrl+shift+p", {
     description: "Toggle session permissions",
     handler: (ctx) => {
       controller.togglePermissions();

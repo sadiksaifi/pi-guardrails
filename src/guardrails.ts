@@ -365,6 +365,177 @@ function buildStrictPrompt(
   };
 }
 
+function splitSequentialShellCommands(command: string): string[] | undefined {
+  const segments: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | undefined;
+  let escaping = false;
+
+  const pushSegment = () => {
+    const segment = current.trim();
+    if (segment.length === 0) return false;
+    segments.push(segment);
+    current = "";
+    return true;
+  };
+
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    const next = command[index + 1];
+
+    if (escaping) {
+      current += char;
+      escaping = false;
+      continue;
+    }
+
+    if (!quote) {
+      if (char === "\\") {
+        current += char;
+        escaping = true;
+        continue;
+      }
+
+      if (char === '"' || char === "'") {
+        quote = char;
+        current += char;
+        continue;
+      }
+
+      if (char === "$" && next === "(") {
+        return undefined;
+      }
+
+      if (char === "&") {
+        if (next !== "&" || !pushSegment()) {
+          return undefined;
+        }
+
+        index += 1;
+        continue;
+      }
+
+      if (char === ";") {
+        if (!pushSegment()) {
+          return undefined;
+        }
+
+        continue;
+      }
+
+      if (
+        char === "|" ||
+        char === ">" ||
+        char === "<" ||
+        char === "`" ||
+        char === "(" ||
+        char === ")"
+      ) {
+        return undefined;
+      }
+
+      current += char;
+      continue;
+    }
+
+    current += char;
+    if (char === quote) {
+      quote = undefined;
+    }
+  }
+
+  if (quote || escaping) {
+    return undefined;
+  }
+
+  const lastSegment = current.trim();
+  if (lastSegment.length === 0) {
+    return segments.length === 0 ? [""] : undefined;
+  }
+
+  segments.push(lastSegment);
+  return segments;
+}
+
+function getSingleScopeCandidate(
+  decisions: ReadonlyArray<{ scopeCandidate?: string }>,
+): string | undefined {
+  if (decisions.length === 0) return undefined;
+
+  const candidates = decisions.map((decision) => decision.scopeCandidate);
+  if (candidates.some((candidate) => candidate === undefined)) {
+    return undefined;
+  }
+
+  const uniqueCandidates = [...new Set(candidates)];
+  return uniqueCandidates.length === 1 ? uniqueCandidates[0] : undefined;
+}
+
+function aggregateBashDecisions(
+  summary: string,
+  decisions: PermissionDecision[],
+): PermissionDecision {
+  const blockedDecision = decisions.find((decision) => decision.outcome === "block");
+  if (blockedDecision) {
+    return blockedDecision;
+  }
+
+  const strictPrompt = decisions.find(
+    (decision) => decision.outcome === "prompt" && decision.promptKind === "strict",
+  ) as Extract<PermissionDecision, { outcome: "prompt" }> | undefined;
+  if (strictPrompt) {
+    return buildStrictPrompt(
+      summary,
+      strictPrompt.classification as Extract<
+        GuardrailsClassification,
+        "safety" | "direct-interaction-required" | "explicit-ask"
+      >,
+    );
+  }
+
+  const normalPrompts = decisions.filter(
+    (
+      decision,
+    ): decision is Extract<PermissionDecision, { outcome: "prompt"; promptKind: "normal" }> =>
+      decision.outcome === "prompt" && decision.promptKind === "normal",
+  );
+  if (normalPrompts.length > 0) {
+    return buildNormalPrompt(summary, getSingleScopeCandidate(normalPrompts));
+  }
+
+  const askAllows = decisions
+    .filter(
+      (decision): decision is Extract<PermissionDecision, { outcome: "allow" }> =>
+        decision.outcome === "allow",
+    )
+    .filter((decision) => decision.classification === "ask");
+  const scopeCandidate = getSingleScopeCandidate(askAllows);
+
+  if (askAllows.some((decision) => decision.reason === "full-access")) {
+    return {
+      outcome: "allow",
+      classification: "ask",
+      reason: "full-access",
+      scopeCandidate,
+    };
+  }
+
+  if (askAllows.some((decision) => decision.reason === "scoped-grant")) {
+    return {
+      outcome: "allow",
+      classification: "ask",
+      reason: "scoped-grant",
+      scopeCandidate,
+    };
+  }
+
+  return {
+    outcome: "allow",
+    classification: "allow",
+    reason: "policy",
+  };
+}
+
 function parseShellCommand(command: string): ParsedShellCommand {
   const tokens: string[] = [];
   let current = "";
@@ -732,6 +903,20 @@ export class GuardrailsController {
 
   private async decideBash(input: Record<string, unknown>): Promise<PermissionDecision> {
     const command = typeof input.command === "string" ? input.command : "";
+    const summary = `bash ${command}`.trim();
+    const sequentialCommands = splitSequentialShellCommands(command);
+
+    if (sequentialCommands && sequentialCommands.length > 1) {
+      const decisions = await Promise.all(
+        sequentialCommands.map((segment) => this.decideSingleBashCommand(segment)),
+      );
+      return aggregateBashDecisions(summary, decisions);
+    }
+
+    return this.decideSingleBashCommand(command);
+  }
+
+  private async decideSingleBashCommand(command: string): Promise<PermissionDecision> {
     const summary = `bash ${command}`.trim();
     const parsed = parseShellCommand(command);
     const firstToken = parsed.tokens[0];

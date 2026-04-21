@@ -262,7 +262,7 @@ test("interactive bash commands use the strict direct-interaction prompt", async
   });
 });
 
-test("compound bash commands cannot use the read-only allowlist", async () => {
+test("readonly bash sequences run without prompts", async () => {
   const controller = new GuardrailsController({ cwd: await createTempProject() });
 
   const decision = await controller.decide({
@@ -271,12 +271,49 @@ test("compound bash commands cannot use the read-only allowlist", async () => {
   });
 
   expect(decision).toEqual<PermissionDecision>({
+    outcome: "allow",
+    classification: "allow",
+    reason: "policy",
+  });
+});
+
+test("compound bash commands keep a single clear scope candidate", async () => {
+  const controller = new GuardrailsController({ cwd: await createTempProject() });
+
+  const decision = await controller.decide({
+    toolName: "bash",
+    input: { command: "pwd && mkdir build" },
+  });
+
+  expect(decision).toEqual<PermissionDecision>({
     outcome: "prompt",
     classification: "ask",
     promptKind: "normal",
     title: "Do you want to allow this action?",
+    options: ["Yes", "Yes, shell:prefix:mkdir:* during this session", "No"],
+    summary: "bash pwd && mkdir build",
+    scopeCandidate: "shell:prefix:mkdir:*",
+  });
+});
+
+test("compound bash commands preserve safety even in full-access mode", async () => {
+  const controller = new GuardrailsController({
+    cwd: await createTempProject(),
+    initialPermissions: "full-access",
+  });
+
+  const decision = await controller.decide({
+    toolName: "bash",
+    input: { command: "pwd && rm -rf build" },
+  });
+
+  expect(decision).toEqual<PermissionDecision>({
+    outcome: "prompt",
+    classification: "safety",
+    promptKind: "strict",
+    title: "Do you want to allow this sensitive action?",
     options: ["Yes", "No"],
-    summary: "bash pwd && ls",
+    summary: "bash pwd && rm -rf build",
   });
 });
 

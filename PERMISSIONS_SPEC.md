@@ -181,11 +181,11 @@ The `/permissions` screen does not need to show:
 
 Use these fixed titles:
 
-| UI | Title |
-|---|---|
-| Normal permission prompt | `Do you want to allow this action?` |
-| Safety prompt | `Do you want to allow this sensitive action?` |
-| `/permissions` selector | `What permissions do you want for this session?` |
+| UI                       | Title                                            |
+| ------------------------ | ------------------------------------------------ |
+| Normal permission prompt | `Do you want to allow this action?`              |
+| Safety prompt            | `Do you want to allow this sensitive action?`    |
+| `/permissions` selector  | `What permissions do you want for this session?` |
 
 These titles are intentionally fixed for MVP.
 

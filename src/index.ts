@@ -294,6 +294,275 @@ function buildStrictPrompt(
   };
 }
 
+interface ParsedShellCommand {
+  tokens: string[];
+  complex: boolean;
+}
+
+const SIMPLE_READ_ONLY_BASH_COMMANDS = new Set([
+  "pwd",
+  "ls",
+  "find",
+  "fd",
+  "cat",
+  "head",
+  "tail",
+  "grep",
+  "rg",
+  "which",
+  "whereis",
+  "type",
+  "file",
+  "stat",
+  "du",
+  "wc",
+]);
+const ALWAYS_INTERACTIVE_BASH_COMMANDS = new Set([
+  "bash",
+  "sh",
+  "zsh",
+  "fish",
+  "vim",
+  "nvim",
+  "nano",
+  "less",
+  "more",
+  "man",
+  "top",
+  "htop",
+  "watch",
+]);
+const REPL_LIKE_COMMANDS = new Set(["python", "ipython", "node", "sqlite3"]);
+const SQL_REPL_COMMANDS = new Set(["psql", "mysql"]);
+const DANGEROUS_BASH_COMMANDS = new Set(["sudo", "rm", "chmod", "chown"]);
+const SCOPEABLE_SINGLE_COMMANDS = new Set(["mkdir", "touch", "cp", "mv"]);
+const SCOPEABLE_GIT_SUBCOMMANDS = new Set(["add", "commit", "checkout", "switch", "restore"]);
+const DANGEROUS_POWERSHELL_PATTERNS = [
+  /\bRemove-Item\b/i,
+  /\bSet-Content\b/i,
+  /\bAdd-Content\b/i,
+  /\bClear-Content\b/i,
+  /\bInvoke-Expression\b/i,
+  /\bStart-Process\b/i,
+  /\bStop-Process\b/i,
+];
+
+function parseShellCommand(command: string): ParsedShellCommand {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | undefined;
+  let escaping = false;
+
+  const flush = () => {
+    if (current.length === 0) return;
+    tokens.push(current);
+    current = "";
+  };
+
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    const next = command[index + 1];
+
+    if (escaping) {
+      current += char;
+      escaping = false;
+      continue;
+    }
+
+    if (!quote) {
+      if (char === "\\") {
+        escaping = true;
+        continue;
+      }
+
+      if (char === '"' || char === "'") {
+        quote = char;
+        continue;
+      }
+
+      if (
+        char === "`" ||
+        char === ";" ||
+        char === "|" ||
+        char === "&" ||
+        char === ">" ||
+        char === "<" ||
+        char === "(" ||
+        char === ")" ||
+        (char === "$" && next === "(")
+      ) {
+        flush();
+        return { tokens, complex: true };
+      }
+
+      if (/\s/.test(char)) {
+        flush();
+        continue;
+      }
+
+      current += char;
+      continue;
+    }
+
+    if (char === quote) {
+      quote = undefined;
+      continue;
+    }
+
+    current += char;
+  }
+
+  flush();
+
+  if (quote || escaping) {
+    return { tokens, complex: true };
+  }
+
+  return { tokens, complex: false };
+}
+
+function hasGroupedFlag(flagSet: readonly string[], token: string): boolean {
+  if (flagSet.includes(token)) return true;
+  if (!token.startsWith("-") || token.startsWith("--") || token.length < 3) return false;
+  const grouped = new Set(token.slice(1).split(""));
+  return flagSet.some((flag) => flag.startsWith("-") && flag.length === 2 && grouped.has(flag[1]!));
+}
+
+function isReadOnlyGitCommand(tokens: readonly string[]): boolean {
+  if (tokens[0] !== "git") return false;
+  const subcommand = tokens[1];
+
+  if (subcommand === "status" || subcommand === "diff" || subcommand === "log" || subcommand === "show") {
+    return true;
+  }
+
+  if (subcommand === "branch") {
+    return tokens.includes("--show-current");
+  }
+
+  return false;
+}
+
+function isInteractiveBashCommand(tokens: readonly string[]): boolean {
+  const command = tokens[0];
+  if (!command) return false;
+  if (ALWAYS_INTERACTIVE_BASH_COMMANDS.has(command)) return true;
+
+  if (REPL_LIKE_COMMANDS.has(command)) {
+    return tokens.length === 1;
+  }
+
+  if (command === "bun") {
+    return tokens[1] === "repl";
+  }
+
+  if (command === "deno") {
+    return tokens[1] === "repl";
+  }
+
+  if (SQL_REPL_COMMANDS.has(command)) {
+    return tokens.length === 1;
+  }
+
+  if (command === "ssh") {
+    const hostArgs = tokens.slice(1).filter((token) => !token.startsWith("-"));
+    return hostArgs.length <= 1;
+  }
+
+  return false;
+}
+
+function getBashScopeCandidate(tokens: readonly string[]): string | undefined {
+  if (tokens.length === 0) return undefined;
+  const command = tokens[0]!;
+
+  if (SCOPEABLE_SINGLE_COMMANDS.has(command)) {
+    return `shell:prefix:${command}:*`;
+  }
+
+  if (command === "git" && tokens[1] && SCOPEABLE_GIT_SUBCOMMANDS.has(tokens[1])) {
+    return `shell:prefix:git ${tokens[1]}:*`;
+  }
+
+  if (command === "bun" && tokens[1] && ["add", "remove", "install", "run"].includes(tokens[1])) {
+    return `shell:prefix:bun ${tokens[1]}:*`;
+  }
+
+  return undefined;
+}
+
+function isReadOnlyBashCommand(parsed: ParsedShellCommand): boolean {
+  if (parsed.complex || parsed.tokens.length === 0) return false;
+  const command = parsed.tokens[0]!;
+
+  if (command.includes("=") && parsed.tokens.length > 1) {
+    return false;
+  }
+
+  if (parsed.tokens.includes("tee")) {
+    return false;
+  }
+
+  return SIMPLE_READ_ONLY_BASH_COMMANDS.has(command) || isReadOnlyGitCommand(parsed.tokens);
+}
+
+function getNonOptionArgs(tokens: readonly string[], startIndex: number): string[] {
+  return tokens.slice(startIndex).filter((token) => !token.startsWith("-"));
+}
+
+function getMutationTargets(tokens: readonly string[]): string[] {
+  const command = tokens[0];
+  if (!command) return [];
+
+  if (command === "mkdir" || command === "touch" || command === "rm" || command === "rmdir") {
+    return getNonOptionArgs(tokens, 1);
+  }
+
+  if (command === "cp") {
+    const operands = getNonOptionArgs(tokens, 1);
+    return operands.length === 0 ? [] : [operands[operands.length - 1]!];
+  }
+
+  if (command === "mv") {
+    return getNonOptionArgs(tokens, 1);
+  }
+
+  if (command === "chmod" || command === "chown") {
+    const operands = getNonOptionArgs(tokens, 1);
+    return operands.slice(1);
+  }
+
+  return [];
+}
+
+function isRecursiveRm(tokens: readonly string[]): boolean {
+  return tokens.some((token) => hasGroupedFlag(["-r", "-R", "-f"], token) || token === "--recursive");
+}
+
+async function classifyBashTargets(cwd: string, tokens: readonly string[]) {
+  const targets = getMutationTargets(tokens);
+  const resolvedTargets = await Promise.all(targets.map((target) => resolveCanonicalTarget(cwd, target)));
+
+  return {
+    rawTargets: targets,
+    resolvedTargets,
+  };
+}
+
+function isCatastrophicTarget(path: string, cwd: string): boolean {
+  const rootPath = dirname(path) === path;
+  if (rootPath) return true;
+  if (path === cwd) return true;
+  if (path === homedir()) return true;
+  const name = basename(path);
+  return name === ".git" || name === ".pi" || name === ".agents";
+}
+
+function extractRedirectionTarget(command: string): string | undefined {
+  const match = command.match(/(?:^|\s)(?:>>|>)\s*([^\s]+)/);
+  return match?.[1];
+}
+
 export function registerGuardrailsToolContract(
   events: Pick<ExtensionAPI, "events"> | Pick<ExtensionRegistration, "events">,
   registration: GuardrailsToolRegistration,
@@ -355,7 +624,7 @@ export class GuardrailsController {
     }
 
     if (input.toolName === "bash") {
-      return this.decideOrdinaryBuiltInAsk("bash", input.input.command);
+      return this.decideBash(input.input);
     }
 
     const contract = this.toolContracts.get(input.toolName);
@@ -446,18 +715,89 @@ export class GuardrailsController {
     return buildNormalPrompt(summary, scopeCandidate);
   }
 
-  private decideOrdinaryBuiltInAsk(toolName: string, detail: unknown): PermissionDecision {
-    const summary = typeof detail === "string" ? `${toolName} ${detail}` : toolName;
+  private async decideBash(input: Record<string, unknown>): Promise<PermissionDecision> {
+    const command = typeof input.command === "string" ? input.command : "";
+    const summary = `bash ${command}`.trim();
+    const parsed = parseShellCommand(command);
+    const firstToken = parsed.tokens[0];
+
+    if (!firstToken) {
+      return buildNormalPrompt(summary, undefined);
+    }
+
+    if (isInteractiveBashCommand(parsed.tokens)) {
+      return buildStrictPrompt(summary, "direct-interaction-required");
+    }
+
+    if ((firstToken === "powershell" || firstToken === "pwsh") && DANGEROUS_POWERSHELL_PATTERNS.some((pattern) => pattern.test(command))) {
+      return buildStrictPrompt(summary, "safety");
+    }
+
+    if (DANGEROUS_BASH_COMMANDS.has(firstToken)) {
+      if (firstToken === "sudo") {
+        return buildStrictPrompt(summary, "safety");
+      }
+
+      const { resolvedTargets } = await classifyBashTargets(this.cwd, parsed.tokens);
+      if (firstToken === "rm" && isRecursiveRm(parsed.tokens)) {
+        const canonicalCwd = await realpath(this.cwd);
+        for (const target of resolvedTargets) {
+          if (isCatastrophicTarget(target.canonicalPath, canonicalCwd)) {
+            return {
+              outcome: "block",
+              classification: "deny",
+              reason: `Blocked by pi-guardrails: ${command}`,
+            };
+          }
+        }
+      }
+
+      return buildStrictPrompt(summary, "safety");
+    }
+
+    const redirectionTarget = extractRedirectionTarget(command);
+    if (redirectionTarget) {
+      const target = await resolveCanonicalTarget(this.cwd, redirectionTarget);
+      if (target.hadTraversal || target.outsideCwd || isProtectedPath(target)) {
+        return buildStrictPrompt(summary, "safety");
+      }
+    }
+
+    if (!parsed.complex) {
+      const { resolvedTargets } = await classifyBashTargets(this.cwd, parsed.tokens);
+      if (resolvedTargets.some((target) => target.hadTraversal || target.outsideCwd || isProtectedPath(target))) {
+        return buildStrictPrompt(summary, "safety");
+      }
+    }
+
+    if (isReadOnlyBashCommand(parsed)) {
+      return {
+        outcome: "allow",
+        classification: "allow",
+        reason: "policy",
+      };
+    }
+
+    const scopeCandidate = parsed.complex ? undefined : getBashScopeCandidate(parsed.tokens);
+    if (scopeCandidate && this.hasExactGrant("bash", scopeCandidate)) {
+      return {
+        outcome: "allow",
+        classification: "ask",
+        reason: "scoped-grant",
+        scopeCandidate,
+      };
+    }
 
     if (this.permissions === "full-access") {
       return {
         outcome: "allow",
         classification: "ask",
         reason: "full-access",
+        scopeCandidate,
       };
     }
 
-    return buildNormalPrompt(summary, undefined);
+    return buildNormalPrompt(summary, scopeCandidate);
   }
 
   private hasBuiltInGrant(toolName: "edit" | "write", targetDir: string): boolean {
@@ -468,6 +808,10 @@ export class GuardrailsController {
       const grantedDir = grant.scope.slice(prefix.length);
       return isSameOrDescendant(targetDir, grantedDir);
     });
+  }
+
+  private hasExactGrant(toolName: string, scope: string): boolean {
+    return this.scopedGrants.some((grant) => grant.toolName === toolName && grant.scope === scope);
   }
 
   private async matchesCustomGrant(

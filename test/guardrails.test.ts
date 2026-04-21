@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import guardrailsExtension, {
   type ExtensionRegistration,
   GuardrailsController,
+  registerGuardrailsToolContract,
   type PermissionDecision,
 } from "../src/index.ts";
 
@@ -184,6 +185,154 @@ test("scoped grants match canonical directories across symlinks", async () => {
     reason: "scoped-grant",
     scopeCandidate: `edit:dir:${canonicalRealDir}`,
   });
+});
+
+test("read-only bash allowlist commands run without prompts", async () => {
+  const controller = new GuardrailsController({ cwd: await createTempProject() });
+
+  const decision = await controller.decide({
+    toolName: "bash",
+    input: { command: "pwd" },
+  });
+
+  expect(decision).toEqual<PermissionDecision>({
+    outcome: "allow",
+    classification: "allow",
+    reason: "policy",
+  });
+});
+
+test("mutating bash commands prompt and offer scoped command-family grants", async () => {
+  const controller = new GuardrailsController({ cwd: await createTempProject() });
+
+  const decision = await controller.decide({
+    toolName: "bash",
+    input: { command: "mkdir build" },
+  });
+
+  expect(decision).toEqual<PermissionDecision>({
+    outcome: "prompt",
+    classification: "ask",
+    promptKind: "normal",
+    title: "Do you want to allow this action?",
+    options: ["Yes", "Yes, shell:prefix:mkdir:* during this session", "No"],
+    summary: "bash mkdir build",
+    scopeCandidate: "shell:prefix:mkdir:*",
+  });
+});
+
+test("dangerous bash commands hard-deny catastrophic deletes", async () => {
+  const controller = new GuardrailsController({ cwd: await createTempProject() });
+
+  const decision = await controller.decide({
+    toolName: "bash",
+    input: { command: "rm -rf /" },
+  });
+
+  expect(decision).toEqual<PermissionDecision>({
+    outcome: "block",
+    classification: "deny",
+    reason: "Blocked by pi-guardrails: rm -rf /",
+  });
+});
+
+test("interactive bash commands use the strict direct-interaction prompt", async () => {
+  const controller = new GuardrailsController({ cwd: await createTempProject() });
+
+  const decision = await controller.decide({
+    toolName: "bash",
+    input: { command: "python" },
+  });
+
+  expect(decision).toEqual<PermissionDecision>({
+    outcome: "prompt",
+    classification: "direct-interaction-required",
+    promptKind: "strict",
+    title: "Do you want to allow this sensitive action?",
+    options: ["Yes", "No"],
+    summary: "bash python",
+  });
+});
+
+test("compound bash commands cannot use the read-only allowlist", async () => {
+  const controller = new GuardrailsController({ cwd: await createTempProject() });
+
+  const decision = await controller.decide({
+    toolName: "bash",
+    input: { command: "pwd && ls" },
+  });
+
+  expect(decision).toEqual<PermissionDecision>({
+    outcome: "prompt",
+    classification: "ask",
+    promptKind: "normal",
+    title: "Do you want to allow this action?",
+    options: ["Yes", "No"],
+    summary: "bash pwd && ls",
+  });
+});
+
+test("custom tool contracts can opt into scoped grants", async () => {
+  const controller = new GuardrailsController({ cwd: await createTempProject() });
+  controller.registerToolContract({
+    toolName: "deploy",
+    contract: {
+      classify: () => "ask",
+      getScopeCandidate: () => "deploy:env:staging",
+    },
+  });
+
+  const promptDecision = await controller.decide({
+    toolName: "deploy",
+    input: { environment: "staging" },
+  });
+  controller.addScopedGrant("deploy", "deploy:env:staging");
+  const grantedDecision = await controller.decide({
+    toolName: "deploy",
+    input: { environment: "staging" },
+  });
+
+  expect(promptDecision).toEqual<PermissionDecision>({
+    outcome: "prompt",
+    classification: "ask",
+    promptKind: "normal",
+    title: "Do you want to allow this action?",
+    options: ["Yes", "Yes, deploy:env:staging during this session", "No"],
+    summary: "deploy",
+    scopeCandidate: "deploy:env:staging",
+  });
+  expect(grantedDecision).toEqual<PermissionDecision>({
+    outcome: "allow",
+    classification: "ask",
+    reason: "scoped-grant",
+    scopeCandidate: "deploy:env:staging",
+  });
+});
+
+test("registration helper emits custom tool contracts on the shared event bus", () => {
+  const emissions: Array<{ channel: string; data: unknown }> = [];
+
+  registerGuardrailsToolContract(
+    {
+      events: {
+        emit(channel, data) {
+          emissions.push({ channel, data });
+        },
+        on() {
+          return () => {};
+        },
+      },
+    },
+    {
+      toolName: "deploy",
+      contract: {
+        classify: () => "ask",
+      },
+    },
+  );
+
+  expect(emissions).toHaveLength(1);
+  expect(emissions[0]?.channel).toBe("pi-guardrails:register-tool-contract");
 });
 
 test("extension registers permissions controls", () => {

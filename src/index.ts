@@ -29,10 +29,6 @@ export {
   type PermissionMode,
 } from "./guardrails.ts";
 
-function toUserFacingPermissions(value: PermissionMode): "Default" | "Full Access" {
-  return value === "default" ? "Default" : "Full Access";
-}
-
 function parseInitialPermissions(raw: boolean | string | undefined): PermissionMode {
   return typeof raw === "string" && isPermissionMode(raw) ? raw : "default";
 }
@@ -41,7 +37,7 @@ function updateStatus(controller: GuardrailsController, ctx: ExtensionContext): 
   if (!ctx.hasUI) return;
   ctx.ui.setStatus(
     "pi-guardrails",
-    `permissions:${toUserFacingPermissions(controller.getPermissions())}`,
+    controller.getPermissions() === "full-access" ? "Full Access" : undefined,
   );
 }
 

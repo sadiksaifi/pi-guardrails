@@ -23,6 +23,7 @@ function createFakePi() {
       },
     },
   };
+  const shortcutHandlers = new Map<string, (ctx: unknown) => void>();
 
   const pi = {
     events: registrations.events,
@@ -43,15 +44,19 @@ function createFakePi() {
         defaultValue: options.default,
       });
     },
-    registerShortcut(shortcut: string, options: { description?: string }) {
+    registerShortcut(
+      shortcut: string,
+      options: { description?: string; handler: (ctx: unknown) => void },
+    ) {
       registrations.shortcuts.push({ shortcut, description: options.description });
+      shortcutHandlers.set(shortcut, options.handler);
     },
     getFlag() {
       return undefined;
     },
   };
 
-  return { pi, registrations };
+  return { pi, registrations, shortcutHandlers };
 }
 
 test("controller starts in default permissions and toggles to full-access", async () => {
@@ -336,6 +341,58 @@ test("registration helper emits custom tool contracts on the shared event bus", 
 
   expect(emissions).toHaveLength(1);
   expect(emissions[0]?.channel).toBe("pi-guardrails:register-tool-contract");
+});
+
+test("extension hides default status and shows full access label", () => {
+  const { pi, registrations, shortcutHandlers } = createFakePi();
+  const statuses: Array<string | undefined> = [];
+
+  guardrailsExtension(pi as never);
+
+  const sessionStartHandler = registrations.handlers.find(
+    (handler) => handler.event === "session_start",
+  )?.handler as
+    | ((
+        event: unknown,
+        ctx: {
+          cwd: string;
+          hasUI: true;
+          ui: { setStatus: (key: string, value: string | undefined) => void };
+        },
+      ) => void)
+    | undefined;
+  const toggleHandler = shortcutHandlers.get("ctrl+shift+p");
+
+  sessionStartHandler?.(
+    {},
+    {
+      cwd: process.cwd(),
+      hasUI: true,
+      ui: {
+        setStatus(_key, value) {
+          statuses.push(value);
+        },
+      },
+    },
+  );
+  toggleHandler?.({
+    hasUI: true,
+    ui: {
+      setStatus(_key: string, value: string | undefined) {
+        statuses.push(value);
+      },
+    },
+  });
+  toggleHandler?.({
+    hasUI: true,
+    ui: {
+      setStatus(_key: string, value: string | undefined) {
+        statuses.push(value);
+      },
+    },
+  });
+
+  expect(statuses).toEqual([undefined, "Full Access", undefined]);
 });
 
 test("extension registers permissions controls", () => {
